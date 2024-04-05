@@ -7,6 +7,7 @@ use crate::tags::{
     CompressionMethod, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat, Tag,
 };
 use crate::{ColorType, TiffError, TiffFormatError, TiffResult, TiffUnsupportedError, UsageError};
+use fax;
 use std::io::{self, Cursor, Read, Seek};
 use std::sync::Arc;
 
@@ -368,6 +369,7 @@ impl Image {
     }
 
     fn create_reader<'r, R: 'r + Read>(
+        &self,
         reader: R,
         photometric_interpretation: PhotometricInterpretation,
         compression_method: CompressionMethod,
@@ -446,6 +448,22 @@ impl Image {
                 let data = decoder.decode()?;
 
                 Box::new(Cursor::new(data))
+            }
+            CompressionMethod::Fax4 => {
+                let width = u16::try_from(self.width)?;
+                let height = u16::try_from(self.height)?;
+                let mut out: Vec<u8> = Vec::with_capacity(usize::from(width) * usize::from(height));
+
+                let mut buffer = Vec::with_capacity(usize::try_from(compressed_length)?);
+                reader.take(compressed_length).read_to_end(&mut buffer)?;
+
+                fax::decoder::decode_g4(buffer.into_iter(), width, Some(height), |transitions| {
+                    out.extend(fax::decoder::pels(transitions, width).map(|c| match c {
+                        fax::Color::Black => 255, // fax4-encoded images in tiff files appear to be inverted from those in PDFs
+                        fax::Color::White => 0,
+                    }))
+                });
+                Box::new(Cursor::new(out))
             }
             method => {
                 return Err(TiffError::UnsupportedError(
@@ -633,7 +651,7 @@ impl Image {
 
         let padding_right = chunk_dims.0 - data_dims.0;
 
-        let mut reader = Self::create_reader(
+        let mut reader = self.create_reader(
             reader,
             photometric_interpretation,
             compression_method,
