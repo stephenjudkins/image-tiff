@@ -457,9 +457,12 @@ impl Image {
                 let mut buffer = Vec::with_capacity(usize::try_from(compressed_length)?);
                 reader.take(compressed_length).read_to_end(&mut buffer)?;
 
+                // all extant tiff/fax4 decoders I've found always assume that the photometric interpretation
+                // is `WhiteIsZero`, ignoring the tag. ImageMagick appears to generate fax4-encoded tiffs
+                // with the tag incorrectly set to `BlackIsZero`.
                 fax::decoder::decode_g4(buffer.into_iter(), width, Some(height), |transitions| {
                     out.extend(fax::decoder::pels(transitions, width).map(|c| match c {
-                        fax::Color::Black => 255, // fax4-encoded images in tiff files appear to be inverted from those in PDFs
+                        fax::Color::Black => 255,
                         fax::Color::White => 0,
                     }))
                 });
