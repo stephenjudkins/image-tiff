@@ -458,12 +458,17 @@ impl Image {
                 // all extant tiff/fax4 decoders I've found always assume that the photometric interpretation
                 // is `WhiteIsZero`, ignoring the tag. ImageMagick appears to generate fax4-encoded tiffs
                 // with the tag incorrectly set to `BlackIsZero`.
-                fax::decoder::decode_g4(reader.bytes().map(|b| b.unwrap() ), width, Some(height), |transitions| {
-                    out.extend(fax::decoder::pels(transitions, width).map(|c| match c {
-                        fax::Color::Black => 255,
-                        fax::Color::White => 0,
-                    }))
-                });
+                fax::decoder::decode_g4(
+                    reader.bytes().map(|b| b.unwrap()),
+                    width,
+                    Some(height),
+                    |transitions| {
+                        out.extend(fax::decoder::pels(transitions, width).map(|c| match c {
+                            fax::Color::Black => 255,
+                            fax::Color::White => 0,
+                        }))
+                    },
+                );
                 Box::new(Cursor::new(out))
             }
             method => {
