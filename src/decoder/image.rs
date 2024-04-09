@@ -493,7 +493,7 @@ impl Image {
                 }
 
                 Box::new(Group4Reader {
-                    decoder: fax::decoder::Group4Decoder::new(reader.bytes(), width)?,
+                    decoder: fax::decoder::Group4Decoder::new(reader.take(compressed_length).bytes(), width)?,
                     line_buf: VecDeque::with_capacity(usize::from(width)),
                     y: 0,
                     width: width,
