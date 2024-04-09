@@ -8,6 +8,9 @@ use crate::tags::{
 };
 use crate::{ColorType, TiffError, TiffFormatError, TiffResult, TiffUnsupportedError, UsageError};
 use fax;
+use fax::decoder::Group4Decoder;
+use std::borrow::Borrow;
+use std::collections::VecDeque;
 use std::io::{self, Cursor, Read, Seek};
 use std::sync::Arc;
 
@@ -369,8 +372,7 @@ impl Image {
     }
 
     fn create_reader<'r, R: 'r + Read>(
-        width: u32,
-        height: u32,
+        dimensions: (u32, u32),
         reader: R,
         photometric_interpretation: PhotometricInterpretation,
         compression_method: CompressionMethod,
@@ -451,25 +453,52 @@ impl Image {
                 Box::new(Cursor::new(data))
             }
             CompressionMethod::Fax4 => {
-                let width = u16::try_from(width)?;
-                let height = u16::try_from(height)?;
-                let mut out: Vec<u8> = Vec::with_capacity(usize::from(width) * usize::from(height));
+                let width = u16::try_from(dimensions.0)?;
+                let height = u16::try_from(dimensions.1)?;
 
-                // all extant tiff/fax4 decoders I've found always assume that the photometric interpretation
-                // is `WhiteIsZero`, ignoring the tag. ImageMagick appears to generate fax4-encoded tiffs
-                // with the tag incorrectly set to `BlackIsZero`.
-                fax::decoder::decode_g4(
-                    reader.bytes().map(|b| b.unwrap()),
-                    width,
-                    Some(height),
-                    |transitions| {
-                        out.extend(fax::decoder::pels(transitions, width).map(|c| match c {
-                            fax::Color::Black => 255,
-                            fax::Color::White => 0,
-                        }))
-                    },
-                );
-                Box::new(Cursor::new(out))
+                struct Group4Reader<R2> {
+                    decoder: fax::decoder::Group4Decoder<std::io::Bytes<R2>>,
+                    line_buf: VecDeque<u8>,
+                    y: u16,
+                    height: u16,
+                    width: u16,
+                }
+
+                impl<R2: Read> Read for Group4Reader<R2> {
+                    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                        if self.line_buf.is_empty() && self.y < self.height {
+                            let next = self.decoder.advance().map_err(|e| {
+                                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                                })?;
+
+                            match next {
+                                fax::decoder::DecodeStatus::End => (),
+                                fax::decoder::DecodeStatus::Incomplete => {
+                                    self.y += 1;
+                                    self.line_buf.extend(
+                                        // all extant tiff/fax4 decoders I've found always assume that the photometric interpretation
+                                        // is `WhiteIsZero`, ignoring the tag. ImageMagick appears to generate fax4-encoded tiffs
+                                        // with the tag incorrectly set to `BlackIsZero`.
+                                        fax::decoder::pels(self.decoder.transition(), self.width)
+                                            .map(|c| match c {
+                                                fax::Color::Black => 255,
+                                                fax::Color::White => 0,
+                                            }),
+                                    );
+                                }
+                            }
+                        }
+                        self.line_buf.read(buf)
+                    }
+                }
+
+                Box::new(Group4Reader {
+                    decoder: fax::decoder::Group4Decoder::new(reader.bytes(), width)?,
+                    line_buf: VecDeque::with_capacity(usize::from(width)),
+                    y: 0,
+                    width: width,
+                    height: height,
+                })
             }
             method => {
                 return Err(TiffError::UnsupportedError(
@@ -658,8 +687,7 @@ impl Image {
         let padding_right = chunk_dims.0 - data_dims.0;
 
         let mut reader = Self::create_reader(
-            self.width,
-            self.height,
+            chunk_dims,
             reader,
             photometric_interpretation,
             compression_method,
