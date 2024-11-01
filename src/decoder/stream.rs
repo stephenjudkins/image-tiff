@@ -259,6 +259,7 @@ impl<R: Read> Read for PackBitsReader<R> {
 
 pub struct Group4Reader<R: Read> {
     decoder: Group4Decoder<std::io::Bytes<std::io::Take<R>>>,
+    bits: BitVec<u8, Msb0>,
     byte_buf: VecDeque<u8>,
     height: u16,
     width: u16,
@@ -278,6 +279,7 @@ impl<R: Read> Group4Reader<R> {
 
         Ok(Self {
             decoder: Group4Decoder::new(reader.take(compressed_length).bytes(), width)?,
+            bits: BitVec::new(),
             byte_buf: VecDeque::new(),
             width: width,
             height: height,
@@ -306,12 +308,12 @@ impl<R: Read> Read for Group4Reader<R> {
                             fax::Color::White => 0x00,
                         }))
                     } else {
-                        let mut bits: BitVec<u8, Msb0> = BitVec::new();
-                        bits.extend(transitions.map(|c| match c {
+                        self.bits.extend(transitions.map(|c| match c {
                             fax::Color::Black => true,
                             fax::Color::White => false,
                         }));
-                        self.byte_buf.extend(bits.as_raw_slice());
+                        self.byte_buf.extend(self.bits.as_raw_slice());
+                        self.bits.clear();
                     }
                 }
             }
