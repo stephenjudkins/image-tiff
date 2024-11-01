@@ -305,6 +305,7 @@ where
     ifd_offsets: Vec<u64>,
     seen_ifds: HashSet<u64>,
     image: Image,
+    options: DecoderOptions,
 }
 
 trait Wrapping {
@@ -511,9 +512,21 @@ fn fix_endianness(buf: &mut DecodingBuffer, byte_order: ByteOrder) {
     };
 }
 
+#[derive(Debug)]
+pub struct DecoderOptions {
+    pub expand_samples_to_bytes: bool,
+}
+
 impl<R: Read + Seek> Decoder<R> {
+    pub fn new(r: R) -> TiffResult<Decoder<R>> {
+        let default_options = DecoderOptions {
+            expand_samples_to_bytes: false,
+        };
+        Self::new_with_options(r, default_options)
+    }
+
     /// Create a new decoder that decodes from the stream ```r```
-    pub fn new(mut r: R) -> TiffResult<Decoder<R>> {
+    pub fn new_with_options(mut r: R, options: DecoderOptions) -> TiffResult<Decoder<R>> {
         let mut endianess = Vec::with_capacity(2);
         (&mut r).take(2).read_to_end(&mut endianess)?;
         let byte_order = match &*endianess {
@@ -584,7 +597,9 @@ impl<R: Read + Seek> Decoder<R> {
                 tile_attributes: None,
                 chunk_offsets: Vec::new(),
                 chunk_bytes: Vec::new(),
+                expand_samples_to_bytes: options.expand_samples_to_bytes,
             },
+            options: options,
         };
         decoder.next_image()?;
         Ok(decoder)
@@ -636,7 +651,13 @@ impl<R: Read + Seek> Decoder<R> {
         if let Some(ifd_offset) = self.ifd_offsets.get(ifd_index) {
             let (ifd, _next_ifd) = Self::read_ifd(&mut self.reader, self.bigtiff, *ifd_offset)?;
 
-            self.image = Image::from_reader(&mut self.reader, ifd, &self.limits, self.bigtiff)?;
+            self.image = Image::from_reader(
+                &mut self.reader,
+                ifd,
+                &self.limits,
+                self.bigtiff,
+                self.options.expand_samples_to_bytes,
+            )?;
 
             Ok(())
         } else {
@@ -676,7 +697,13 @@ impl<R: Read + Seek> Decoder<R> {
     pub fn next_image(&mut self) -> TiffResult<()> {
         let (ifd, _next_ifd) = self.next_ifd()?;
 
-        self.image = Image::from_reader(&mut self.reader, ifd, &self.limits, self.bigtiff)?;
+        self.image = Image::from_reader(
+            &mut self.reader,
+            ifd,
+            &self.limits,
+            self.bigtiff,
+            self.options.expand_samples_to_bytes,
+        )?;
         Ok(())
     }
 
@@ -1055,7 +1082,15 @@ impl<R: Read + Seek> Decoder<R> {
     }
 
     fn result_buffer(&self, width: usize, height: usize) -> TiffResult<DecodingResult> {
-        let buffer_size = match width
+        let max_sample_bits = self.image().bits_per_sample;
+
+        let stride = if !self.options.expand_samples_to_bytes && max_sample_bits < 8 {
+            width.div_ceil(8)
+        } else {
+            width
+        };
+
+        let buffer_size = match stride
             .checked_mul(height)
             .and_then(|x| x.checked_mul(self.image().samples_per_pixel()))
         {
@@ -1063,12 +1098,9 @@ impl<R: Read + Seek> Decoder<R> {
             None => return Err(TiffError::LimitsExceeded),
         };
 
-        let max_sample_bits = self.image().bits_per_sample;
         match self.image().sample_format {
             SampleFormat::Uint => match max_sample_bits {
-                n if n < 8 => {
-                    DecodingResult::new_u8(buffer_size / 8 * usize::from(n), &self.limits)
-                }
+                n if n < 8 => DecodingResult::new_u8(buffer_size, &self.limits),
                 n if n == 8 => DecodingResult::new_u8(buffer_size, &self.limits),
                 n if n <= 16 => DecodingResult::new_u16(buffer_size, &self.limits),
                 n if n <= 32 => DecodingResult::new_u32(buffer_size, &self.limits),

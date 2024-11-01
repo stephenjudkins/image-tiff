@@ -1,5 +1,8 @@
 //! All IO functionality needed for TIFF decoding
 
+use crate::TiffResult;
+use fax::decoder::Group4Decoder;
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Seek, Take};
 
 /// Byte order of the TIFF file.
@@ -249,6 +252,77 @@ impl<R: Read> Read for PackBitsReader<R> {
             self.state = PackBitsReaderState::Header;
         }
         Ok(actual)
+    }
+}
+
+pub struct Group4Reader<R: Read> {
+    decoder: Group4Decoder<std::io::Bytes<std::io::Take<R>>>,
+    bits: bitvec::vec::BitVec<u8, bitvec::prelude::Msb0>,
+    byte_buf: VecDeque<u8>,
+    height: u16,
+    width: u16,
+    y: u16,
+    expand_samples_to_bytes: bool,
+}
+
+impl<R: Read> Group4Reader<R> {
+    pub fn new(
+        dimensions: (u32, u32),
+        reader: R,
+        compressed_length: u64,
+        expand_samples_to_bytes: bool,
+    ) -> TiffResult<Self> {
+        let width = u16::try_from(dimensions.0)?;
+        let height = u16::try_from(dimensions.1)?;
+
+        Ok(Self {
+            decoder: Group4Decoder::new(reader.take(compressed_length).bytes(), width)?,
+            bits: bitvec::vec::BitVec::new(),
+            byte_buf: VecDeque::new(),
+            width: width,
+            height: height,
+            y: 0,
+            expand_samples_to_bytes: expand_samples_to_bytes,
+        })
+    }
+
+    pub fn dump_bits(&mut self) -> () {
+        if self.expand_samples_to_bytes {
+            self.byte_buf.extend(
+                self.bits
+                    .iter()
+                    .by_vals()
+                    .map(|b| if b { 0xFF } else { 0x00 }),
+            );
+        } else {
+            self.byte_buf.extend(self.bits.as_raw_slice());
+        }
+        self.bits.clear()
+    }
+}
+
+impl<R: Read> Read for Group4Reader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.byte_buf.is_empty() && self.y < self.height {
+            let next = self
+                .decoder
+                .advance()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            match next {
+                fax::decoder::DecodeStatus::End => self.dump_bits(),
+                fax::decoder::DecodeStatus::Incomplete => {
+                    self.y += 1;
+                    for c in fax::decoder::pels(self.decoder.transition(), self.width) {
+                        self.bits.push(match c {
+                            fax::Color::Black => true,
+                            fax::Color::White => false,
+                        });
+                    }
+                    self.dump_bits();
+                }
+            }
+        }
+        self.byte_buf.read(buf)
     }
 }
 

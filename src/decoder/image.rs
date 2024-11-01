@@ -1,5 +1,5 @@
 use super::ifd::{Directory, Value};
-use super::stream::{ByteOrder, DeflateReader, LZWReader, PackBitsReader};
+use super::stream::{ByteOrder, DeflateReader, Group4Reader, LZWReader, PackBitsReader};
 use super::tag_reader::TagReader;
 use super::{fp_predict_f32, fp_predict_f64, DecodingBuffer, Limits};
 use super::{stream::SmartReader, ChunkType};
@@ -7,12 +7,7 @@ use crate::tags::{
     CompressionMethod, PhotometricInterpretation, PlanarConfiguration, Predictor, SampleFormat, Tag,
 };
 use crate::{ColorType, TiffError, TiffFormatError, TiffResult, TiffUnsupportedError, UsageError};
-use bitvec;
-use fax;
-use fax::decoder::Group4Decoder;
-use std::borrow::Borrow;
-use std::collections::VecDeque;
-use std::io::{self, Cursor, Read, Seek, Write};
+use std::io::{self, Cursor, Read, Seek};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -82,6 +77,7 @@ pub(crate) struct Image {
     pub tile_attributes: Option<TileAttributes>,
     pub chunk_offsets: Vec<u64>,
     pub chunk_bytes: Vec<u64>,
+    pub expand_samples_to_bytes: bool,
 }
 
 impl Image {
@@ -90,6 +86,7 @@ impl Image {
         ifd: Directory,
         limits: &Limits,
         bigtiff: bool,
+        expand_samples_to_bytes: bool,
     ) -> TiffResult<Image> {
         let mut tag_reader = TagReader {
             reader,
@@ -313,6 +310,7 @@ impl Image {
             tile_attributes,
             chunk_offsets,
             chunk_bytes,
+            expand_samples_to_bytes,
         })
     }
 
@@ -353,7 +351,13 @@ impl Image {
             },
             PhotometricInterpretation::BlackIsZero | PhotometricInterpretation::WhiteIsZero => {
                 match self.samples {
-                    1 => Ok(ColorType::Gray(self.bits_per_sample)),
+                    1 => {
+                        if self.bits_per_sample < 8 && self.expand_samples_to_bytes {
+                            Ok(ColorType::Gray(8))
+                        } else {
+                            Ok(ColorType::Gray(self.bits_per_sample))
+                        }
+                    }
                     _ => Ok(ColorType::Multiband {
                         bit_depth: self.bits_per_sample,
                         num_samples: self.samples,
@@ -379,6 +383,7 @@ impl Image {
         compression_method: CompressionMethod,
         compressed_length: u64,
         jpeg_tables: Option<&[u8]>,
+        expand_samples_to_bytes: bool,
     ) -> TiffResult<Box<dyn Read + 'r>> {
         Ok(match compression_method {
             CompressionMethod::None => Box::new(reader),
@@ -453,67 +458,12 @@ impl Image {
 
                 Box::new(Cursor::new(data))
             }
-            CompressionMethod::Fax4 => {
-                let width = u16::try_from(dimensions.0)?;
-                let height = u16::try_from(dimensions.1)?;
-
-                struct Group4Reader<R2> {
-                    decoder: fax::decoder::Group4Decoder<std::io::Bytes<R2>>,
-                    bits: bitvec::vec::BitVec<u8, bitvec::prelude::Msb0>,
-                    byte_buf: VecDeque<u8>,
-                    y: u16,
-                    height: u16,
-                    width: u16,
-                }
-
-                impl<R2: Read> Read for Group4Reader<R2> {
-                    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-                        if self.byte_buf.is_empty() && self.y < self.height {
-                            let next = self
-                                .decoder
-                                .advance()
-                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-                            match next {
-                                fax::decoder::DecodeStatus::End => {
-                                    // eprintln!("DONE!");
-                                    self.byte_buf.extend(self.bits.as_raw_slice())
-                                }
-                                fax::decoder::DecodeStatus::Incomplete => {
-                                    self.y += 1;
-                                    // eprintln!("{:?}", self.y);
-                                    for c in
-                                        fax::decoder::pels(self.decoder.transition(), self.width)
-                                    {
-                                        self.bits.push(match c {
-                                            fax::Color::Black => true,
-                                            fax::Color::White => false,
-                                        });
-                                        if self.bits.len() == 8 {
-                                            self.byte_buf.extend(self.bits.as_raw_slice());
-                                            self.bits.clear()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // eprintln!("{:?}: {:?} / {:?}", self.y, self.byte_buf.len(), self.bits.len());
-
-                        self.byte_buf.read(buf)
-                    }
-                }
-
-                Box::new(Group4Reader {
-                    decoder: fax::decoder::Group4Decoder::new(
-                        reader.take(compressed_length).bytes(),
-                        width,
-                    )?,
-                    bits: bitvec::vec::BitVec::new(),
-                    byte_buf: VecDeque::new(),
-                    y: 0,
-                    width: width,
-                    height: height,
-                })
-            }
+            CompressionMethod::Fax4 => Box::new(Group4Reader::new(
+                dimensions,
+                reader,
+                compressed_length,
+                expand_samples_to_bytes,
+            )?),
             method => {
                 return Err(TiffError::UnsupportedError(
                     TiffUnsupportedError::UnsupportedCompressionMethod(method),
@@ -596,7 +546,13 @@ impl Image {
                 // Ignore potential vertical padding on the bottommost strip
                 let strip_height = dims.1.min(strip_height_without_padding);
 
-                Ok((dims.0, strip_height))
+                let strip_width = if !self.expand_samples_to_bytes && self.bits_per_sample < 8 {
+                    (dims.0 * self.bits_per_sample as u32).div_ceil(8)
+                } else {
+                    dims.0
+                };
+
+                Ok((strip_width, strip_height))
             }
             ChunkType::Tile => {
                 let tile_attrs = self.tile_attributes.as_ref().unwrap();
@@ -698,7 +654,11 @@ impl Image {
         let chunk_dims = self.chunk_dimensions()?;
         let data_dims = self.chunk_data_dimensions(chunk_index)?;
 
-        let padding_right = chunk_dims.0 - data_dims.0;
+        let padding_right = if self.bits_per_sample >= 8 {
+            chunk_dims.0 - data_dims.0
+        } else {
+            0
+        };
 
         let mut reader = Self::create_reader(
             chunk_dims,
@@ -707,6 +667,7 @@ impl Image {
             compression_method,
             *compressed_bytes,
             self.jpeg_tables.as_deref().map(|a| &**a),
+            self.expand_samples_to_bytes,
         )?;
 
         if output_width == data_dims.0 as usize && padding_right == 0 {
@@ -744,7 +705,7 @@ impl Image {
             }
         } else {
             for row in 0..data_dims.1 as usize {
-                let row_start = row * output_width * samples;
+                let row_start = row * data_dims.0 as usize * samples;
                 let row_end = row_start + data_dims.0 as usize * samples;
 
                 let row = &mut buffer.as_bytes_mut()[(row_start * byte_len)..(row_end * byte_len)];
