@@ -68,6 +68,8 @@ pub enum TiffFormatError {
     UnknownPredictor(u16),
     UnknownPlanarConfiguration(u16),
     ByteExpected(Value),
+    SignedByteExpected(Value),
+    SignedShortExpected(Value),
     UnsignedIntegerExpected(Value),
     SignedIntegerExpected(Value),
     Format(String),
@@ -119,6 +121,8 @@ impl fmt::Display for TiffFormatError {
                 write!(fmt, "Unknown planar configuration “{}” encountered", planar_config)
             }
             ByteExpected(ref val) => write!(fmt, "Expected byte, {:?} found.", val),
+            SignedByteExpected(ref val) => write!(fmt, "Expected signed byte, {:?} found.", val),
+            SignedShortExpected(ref val) => write!(fmt, "Expected signed short, {:?} found.", val),
             UnsignedIntegerExpected(ref val) => {
                 write!(fmt, "Expected unsigned integer, {:?} found.", val)
             }
@@ -161,6 +165,7 @@ pub enum TiffUnsupportedError {
     UnsupportedDataType,
     UnsupportedInterpretation(PhotometricInterpretation),
     UnsupportedJpegFeature(UnsupportedFeature),
+    MisalignedTileBoundaries,
 }
 
 impl fmt::Display for TiffUnsupportedError {
@@ -219,6 +224,7 @@ impl fmt::Display for TiffUnsupportedError {
             UnsupportedJpegFeature(ref unsupported_feature) => {
                 write!(fmt, "Unsupported JPEG feature {:?}", unsupported_feature)
             }
+            MisalignedTileBoundaries => write!(fmt, "Tile rows are not aligned to byte boundaries"),
         }
     }
 }
@@ -230,6 +236,9 @@ impl fmt::Display for TiffUnsupportedError {
 pub enum UsageError {
     InvalidChunkType(ChunkType, ChunkType),
     InvalidChunkIndex(u32),
+    PredictorCompressionMismatch,
+    PredictorIncompatible,
+    PredictorUnavailable,
 }
 
 impl fmt::Display for UsageError {
@@ -244,6 +253,15 @@ impl fmt::Display for UsageError {
                 )
             }
             InvalidChunkIndex(index) => write!(fmt, "Image chunk index ({}) requested.", index),
+            PredictorCompressionMismatch => write!(
+                fmt,
+                "The requested predictor is not compatible with the requested compression"
+            ),
+            PredictorIncompatible => write!(
+                fmt,
+                "The requested predictor is not compatible with the image's format"
+            ),
+            PredictorUnavailable => write!(fmt, "The requested predictor is not available"),
         }
     }
 }
