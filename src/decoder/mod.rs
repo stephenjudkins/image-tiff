@@ -998,7 +998,7 @@ impl<R: Read + Seek> Decoder<R> {
     fn result_buffer(&self, width: usize, height: usize) -> TiffResult<DecodingResult> {
         let bits_per_sample = self.image().bits_per_sample;
 
-        let row_samples = if bits_per_sample >= 8 {
+        let row_samples = if bits_per_sample >= 8 || self.options.expand_samples_to_bytes {
             width
         } else {
             ((((width as u64) * bits_per_sample as u64) + 7) / 8)
@@ -1015,8 +1015,7 @@ impl<R: Read + Seek> Decoder<R> {
 
         match self.image().sample_format {
             SampleFormat::Uint => match max_sample_bits {
-                n if n < 8 => DecodingResult::new_u8(buffer_size, &self.limits),
-                n if n == 8 => DecodingResult::new_u8(buffer_size, &self.limits),
+                n if n <= 8 => DecodingResult::new_u8(buffer_size, &self.limits),
                 n if n <= 16 => DecodingResult::new_u16(buffer_size, &self.limits),
                 n if n <= 32 => DecodingResult::new_u32(buffer_size, &self.limits),
                 n if n <= 64 => DecodingResult::new_u64(buffer_size, &self.limits),

@@ -351,13 +351,7 @@ impl Image {
             },
             PhotometricInterpretation::BlackIsZero | PhotometricInterpretation::WhiteIsZero => {
                 match self.samples {
-                    1 => {
-                        if self.bits_per_sample < 8 && self.expand_samples_to_bytes {
-                            Ok(ColorType::Gray(8))
-                        } else {
-                            Ok(ColorType::Gray(self.bits_per_sample))
-                        }
-                    }
+                    1 => Ok(ColorType::Gray(self.bits_per_sample)),
                     _ => Ok(ColorType::Multiband {
                         bit_depth: self.bits_per_sample,
                         num_samples: self.samples,
